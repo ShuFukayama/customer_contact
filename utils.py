@@ -263,11 +263,35 @@ def execute_agent_or_chain(chat_message):
         response = result["output"]
     # AIエージェントを利用しない場合
     else:
-        # RAGのChainを実行
-        result = st.session_state.rag_chain.invoke({"input": chat_message, "chat_history": st.session_state.chat_history})
-        # 会話履歴への追加
-        st.session_state.chat_history.extend([HumanMessage(content=chat_message), AIMessage(content=result["answer"])])
-        response = result["answer"]
+        try:
+            # 文脈理解強化ツールと回答品質評価・改善ツールを使用
+            from context_tools import process_with_enhanced_tools
+            
+            # 強化ツールを使用して回答を生成
+            if "use_enhanced_tools" in st.session_state and st.session_state.use_enhanced_tools:
+                retriever = st.session_state.rag_chain.retriever
+                final_answer, retrieved_docs = process_with_enhanced_tools(
+                    chat_message,
+                    st.session_state.chat_history,
+                    retriever,
+                    st.session_state.llm
+                )
+                # 会話履歴への追加
+                st.session_state.chat_history.extend([HumanMessage(content=chat_message), AIMessage(content=final_answer)])
+                response = final_answer
+            else:
+                # 従来のRAGチェーンを実行
+                result = st.session_state.rag_chain.invoke({"input": chat_message, "chat_history": st.session_state.chat_history})
+                # 会話履歴への追加
+                st.session_state.chat_history.extend([HumanMessage(content=chat_message), AIMessage(content=result["answer"])])
+                response = result["answer"]
+        except Exception as e:
+            logger.error(f"強化ツールの実行中にエラーが発生: {e}")
+            # エラーが発生した場合は従来のRAGチェーンを実行
+            result = st.session_state.rag_chain.invoke({"input": chat_message, "chat_history": st.session_state.chat_history})
+            # 会話履歴への追加
+            st.session_state.chat_history.extend([HumanMessage(content=chat_message), AIMessage(content=result["answer"])])
+            response = result["answer"]
 
     # LLMから参照先のデータを基にした回答が行われた場合のみ、フィードバックボタンを表示
     if response != ct.NO_DOC_MATCH_MESSAGE:
@@ -373,14 +397,33 @@ def notice_slack(chat_message):
     now_datetime = get_datetime()
 
     # Slack通知用のプロンプト生成
-    prompt = PromptTemplate(
-        input_variables=["slack_id_text", "query", "context", "now_datetime"],
-        template=ct.SYSTEM_PROMPT_NOTICE_SLACK,
-    )
-    prompt_message = prompt.format(slack_id_text=slack_id_text, query=chat_message, context=context, now_datetime=now_datetime)
-
-    # Slack通知の実行
-    agent_executor.invoke({"input": prompt_message})
+    try:
+        # 変数の準備
+        variables = {
+            "slack_id_text": slack_id_text,
+            "query": chat_message,
+            "context": context,
+            "now_datetime": now_datetime
+        }
+        
+        # プロンプトテンプレートの直接置換
+        prompt_message = ct.SYSTEM_PROMPT_NOTICE_SLACK
+        for key, value in variables.items():
+            placeholder = "{" + key + "}"
+            prompt_message = prompt_message.replace(placeholder, str(value))
+        
+        # デバッグ用ログ出力
+        logger = logging.getLogger(ct.LOGGER_NAME)
+        logger.info(f"Slack通知プロンプト生成完了: 長さ={len(prompt_message)}")
+        
+        # Slack通知の実行
+        result = agent_executor.invoke({"input": prompt_message})
+        logger.info(f"Slack通知実行完了: {result}")
+    except Exception as e:
+        # エラーログ出力
+        logger = logging.getLogger(ct.LOGGER_NAME)
+        logger.error(f"Slack通知処理でエラーが発生しました: {e}")
+        raise
 
     return ct.CONTACT_THANKS_MESSAGE
 
