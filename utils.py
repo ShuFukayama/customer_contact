@@ -4,6 +4,7 @@
 
 ############################################################
 # ライブラリの読み込み
+from slack_sdk import WebClient
 ############################################################
 import os
 from dotenv import load_dotenv
@@ -16,7 +17,7 @@ from langchain.text_splitter import CharacterTextSplitter
 from langchain.prompts import ChatPromptTemplate, MessagesPlaceholder, PromptTemplate
 from langchain.schema import HumanMessage, AIMessage
 from langchain_openai import OpenAIEmbeddings
-from langchain_community.vectorstores import Chroma
+from langchain_chroma import Chroma
 import chromadb
 from langchain.chains import create_history_aware_retriever, create_retrieval_chain
 from langchain.chains.combine_documents import create_stuff_documents_chain
@@ -28,7 +29,7 @@ from langchain.agents import AgentType, initialize_agent
 from langchain_community.document_loaders.csv_loader import CSVLoader
 from langchain_community.retrievers import BM25Retriever
 from langchain.retrievers import EnsembleRetriever
-from docx import Document
+from langchain.schema import Document
 from langchain.output_parsers import CommaSeparatedListOutputParser
 from langchain import LLMChain
 import datetime
@@ -101,30 +102,18 @@ def create_rag_chain(db_name):
 
     # すでに対象のデータベースが作成済みの場合は読み込み、未作成の場合は新規作成する
     if os.path.isdir(db_name):
-        client_settings = chromadb.config.Settings(
-            chroma_db_impl="duckdb+parquet",
-            persist_directory=db_name,
-            anonymized_telemetry=False
-        )
         db = Chroma(
             collection_name="langchain_store",
             embedding_function=embeddings,
-            client_settings=client_settings,
             persist_directory=db_name,
         )
     else:
-        client_settings = chromadb.config.Settings(
-            chroma_db_impl="duckdb+parquet",
-            persist_directory=db_name,
-            anonymized_telemetry=False
-        )
         db = Chroma(
             collection_name="langchain_store",
             embedding_function=embeddings,
-            client_settings=client_settings,
             persist_directory=db_name,
         )
-        db.add_documents(documents=splitted_docs, embedding=embeddings)
+        db.add_documents(documents=splitted_docs)
         db.persist()
     retriever = db.as_retriever(search_kwargs={"k": ct.TOP_K})
 
@@ -299,7 +288,12 @@ def notice_slack(chat_message):
     """
 
     # Slack通知用のAgent Executorを作成
+    # WebClientを初期化
+    slack_client = WebClient(token=os.environ["SLACK_USER_TOKEN"])
+    # SlackToolkitを初期化
     toolkit = SlackToolkit()
+    # モデルを再構築
+    SlackToolkit.model_rebuild()
     tools = toolkit.get_tools()
     agent_executor = initialize_agent(
         llm=st.session_state.llm,
@@ -333,7 +327,7 @@ def notice_slack(chat_message):
 
     # Retrieverの作成
     embeddings = OpenAIEmbeddings()
-    db = Chroma.from_documents(docs_all, embedding=embeddings)
+    db = Chroma.from_documents(documents=docs_all, embedding=embeddings)
     retriever = db.as_retriever(search_kwargs={"k": ct.TOP_K})
     bm25_retriever = BM25Retriever.from_texts(
         docs_all_page_contents,
@@ -420,7 +414,7 @@ def adjust_reference_data(docs, docs_history):
             if row_history_dict["従業員ID"] == employee_id:
                 same_employee_inquiries.append(row_history_dict)
 
-        new_doc = Document()
+        new_doc = Document(page_content="", metadata={})
 
         if same_employee_inquiries:
             # 従業員情報と問い合わせ対応履歴の結合テキストを生成
@@ -432,10 +426,9 @@ def adjust_reference_data(docs, docs_history):
                 for key, value in inquiry_dict.items():
                     doc += f"{key}: {value}\n"
                 doc += "---------------\n"
-            new_doc.page_content = doc
+            new_doc = Document(page_content=doc, metadata={})
         else:
-            new_doc.page_content = row.page_content
-        new_doc.metadata = {}
+            new_doc = Document(page_content=row.page_content, metadata={})
 
         docs_all.append(new_doc)
     
